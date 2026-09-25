@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   desktopCore,
   type ActionPlan,
@@ -310,6 +311,16 @@ function App() {
     }
   }
 
+  async function handleWindowAction(action: "minimize" | "close"): Promise<void> {
+    try {
+      const window = getCurrentWindow();
+      if (action === "minimize") await window.minimize();
+      else await window.close();
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -331,6 +342,10 @@ function App() {
           <button className="button button-primary" onClick={handleScan} disabled={isBusy}>
             {busy === "scan" ? "扫描中…" : "扫描桌面"}
           </button>
+          <div className="window-actions" aria-label="窗口控制">
+            <button className="window-action" type="button" title="最小化" aria-label="最小化 Desktop Manager" onClick={() => void handleWindowAction("minimize")}>−</button>
+            <button className="window-action window-action-close" type="button" title="关闭" aria-label="关闭 Desktop Manager" onClick={() => void handleWindowAction("close")}>×</button>
+          </div>
         </div>
       </header>
 
@@ -349,22 +364,23 @@ function App() {
           </div>
         </div>
 
-        {error && (
-          <div className="message message-error" role="alert">
-            <span className="message-icon" aria-hidden="true">!</span>
-            <span>{error}</span>
-            <button className="message-close" aria-label="关闭错误提示" onClick={() => setError(null)}>×</button>
-          </div>
-        )}
-        {notice && (
-          <div className={`message message-${notice.kind}`} role="status">
-            <span className="message-icon" aria-hidden="true">✓</span>
-            <span>{notice.message}</span>
-            <button className="message-close" aria-label="关闭提示" onClick={() => setNotice(null)}>×</button>
-          </div>
-        )}
+        {(error || notice) && <div className="message-stack">
+          {error && (
+            <div className="message message-error" role="alert">
+              <span className="message-icon" aria-hidden="true">!</span>
+              <span>{error}</span>
+              <button className="message-close" aria-label="关闭错误提示" onClick={() => setError(null)}>×</button>
+            </div>
+          )}
+          {notice && (
+            <div className={`message message-${notice.kind}`} role="status">
+              <span className="message-icon" aria-hidden="true">✓</span>
+              <span>{notice.message}</span>
+              <button className="message-close" aria-label="关闭提示" onClick={() => setNotice(null)}>×</button>
+            </div>
+          )}
+        </div>}
 
-        <div className="workspace-grid">
           <section className="panel files-panel" aria-labelledby="files-heading">
             <div className="panel-heading">
               <div>
@@ -511,8 +527,6 @@ function App() {
               <span>只有通过策略验证的计划才能执行。</span>
             </div>
           </section>
-        </div>
-
         <section className="panel history-panel" aria-labelledby="history-heading">
           <div className="panel-heading history-heading">
             <div>

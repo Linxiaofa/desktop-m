@@ -46,7 +46,10 @@ name passes the same Core policy before a plan is created.
 
 ## Tauri capability
 
-The packaged app has one trusted local window with core:default only. No
-plugin-fs or plugin-shell permissions are granted. If additional windows or
-remote content are introduced, app commands must be restricted with a
-Tauri app manifest and per-window capabilities before shipping.
+The packaged app has one trusted local window with core:default plus explicit
+minimize and close permissions for its borderless window controls. No
+plugin-fs or plugin-shell permissions are granted. A transparent maximized
+window may intercept clicks in visually empty areas; the user can always
+minimize or close it. If additional windows or remote content are introduced,
+app commands must be restricted with a Tauri app manifest and per-window
+capabilities before shipping.

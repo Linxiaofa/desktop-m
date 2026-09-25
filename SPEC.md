@@ -20,6 +20,13 @@ version indexes its immediate children. Directories may be shown but only
 ordinary top-level files can be moved. Links, junctions, special files, and
 recursive folder moves are outside the first Move policy.
 
+The main window is a desktop-sized, borderless, transparent workspace. Its
+background leaves the current Windows wallpaper visible, while Desktop
+Manager's file, plan, history, rule, provider, and AI panels are arranged
+across the available work area. The taskbar remains available, and the
+workspace has explicit minimize and close controls. "All windows" here
+means these Desktop Manager panels, not windows belonging to other programs.
+
 The destination is one ordinary folder name directly under Desktop. Core may
 create that folder during execution. A target collision invalidates the whole
 plan; no overwrite or automatic renaming is allowed. Batch execution moves

@@ -18,7 +18,9 @@ even when they come from the packaged UI.
 ## Components
 
 - React/TypeScript renders indexed Desktop entries, collects selection,
-  displays plan checks and history, and calls explicit Tauri commands.
+  displays plan checks and history, and calls explicit Tauri commands. It
+  presents these areas as panels across one transparent, maximized Windows
+  work-area window; it does not manage other applications' windows.
 - Rust Desktop Core resolves Windows Known Folder Desktop, owns the SQLite
   connection and policy checks, creates persistent immutable plan items, and
   serializes transactions through a mutex.

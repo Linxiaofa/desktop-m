@@ -16,7 +16,12 @@
         "width": 1120,
         "height": 760,
         "minWidth": 800,
-        "minHeight": 560
+        "minHeight": 560,
+        "maximized": true,
+        "fullscreen": false,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false
       }
     ],
     "security": {

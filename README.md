@@ -15,6 +15,9 @@ For a ready-to-use Windows installation, double-click the generated
 It installs for the current user without administrator rights and creates
 Desktop and Start Menu shortcuts. Use either shortcut to start the app.
 The installer is currently unsigned, so Windows may show a publisher warning.
+The app opens as a transparent desktop workspace across the usable screen,
+with the wallpaper visible behind its panels. Its top bar provides minimize
+and close controls; the Windows taskbar remains available.
 
 To develop from source:
 
