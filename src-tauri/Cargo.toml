@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 keyring = "4"
+url = "2"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]

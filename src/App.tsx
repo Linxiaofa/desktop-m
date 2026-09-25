@@ -6,10 +6,13 @@ import {
   type FileEntry,
   type HistoryEntry,
   type PlanPreview,
+  type RuleSuggestion,
   type ScanSummary,
 } from "./api";
+import RulesPanel from "./RulesPanel";
+import ProviderPanel from "./ProviderPanel";
 
-type BusyAction = "scan" | "refresh" | "preview" | "execute" | `undo:${string}` | null;
+type BusyAction = "scan" | "refresh" | "preview" | "suggest" | "execute" | `undo:${string}` | null;
 type Notice = { kind: "success" | "info"; message: string } | null;
 
 function errorMessage(error: unknown): string {
@@ -69,6 +72,7 @@ function App() {
   const [plan, setPlan] = useState<ActionPlan | null>(null);
   const [preview, setPreview] = useState<PlanPreview | null>(null);
   const [scanSummary, setScanSummary] = useState<ScanSummary | null>(null);
+  const [ruleSuggestions, setRuleSuggestions] = useState<RuleSuggestion[]>([]);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,6 +113,7 @@ function App() {
     setBusy("scan");
     setError(null);
     setNotice(null);
+    setRuleSuggestions([]);
     try {
       const summary = await desktopCore.scanDesktop();
       setScanSummary(summary);
@@ -166,6 +171,7 @@ function App() {
     setPreview(null);
     setError(null);
     setNotice(null);
+    setRuleSuggestions([]);
   }
 
   function toggleFile(id: number): void {
@@ -214,6 +220,29 @@ function App() {
       setPreview(validated);
       if (validated.valid) {
         setNotice({ kind: "success", message: "计划已通过 Desktop Core 策略验证，可以执行。" });
+      }
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleRuleSuggestion(): Promise<void> {
+    if (isBusy || selectedIds.size === 0) return;
+    setBusy("suggest");
+    setError(null);
+    try {
+      const suggestions = await desktopCore.suggestRules([...selectedIds]);
+      setRuleSuggestions(suggestions);
+      const first = suggestions[0]?.destination;
+      if (first && suggestions.every((item) => item.destination === first)) {
+        setDestination(first);
+        setPlan(null);
+        setPreview(null);
+        setNotice({ kind: "info", message: "所有选中文件均建议 Desktop\\" + first + "。请创建计划并预览。" });
+      } else {
+        setNotice({ kind: "info", message: "选中文件没有统一的规则建议，请查看逐项结果或手动填写目录。" });
       }
     } catch (cause) {
       setError(errorMessage(cause));
@@ -409,6 +438,15 @@ function App() {
                 />
               </div>
               <p className="field-help">仅填写单层文件夹名称；Desktop Core 会检查路径边界、文件状态及目标冲突。</p>
+              <button className="button button-quiet rule-suggest-button" onClick={handleRuleSuggestion} disabled={isBusy || selectedIds.size === 0}>
+                {busy === "suggest" ? "正在匹配…" : "查看规则建议"}
+              </button>
+              {ruleSuggestions.length > 0 && <div className="rule-suggestions">
+                {ruleSuggestions.map((item) => <div key={item.fileId}>
+                  <span>{item.fileName}</span>
+                  <strong>{item.destination ? "Desktop\\" + item.destination : "无匹配"}</strong>
+                </div>)}
+              </div>}
               <button className="button button-outline plan-submit" onClick={handlePreview} disabled={isBusy || selectedIds.size === 0 || !destination.trim()}>
                 {busy === "preview" ? "正在验证…" : "创建计划并预览"}
               </button>
@@ -493,6 +531,8 @@ function App() {
             </div>
           )}
         </section>
+        <RulesPanel onChanged={() => setRuleSuggestions([])} />
+        <ProviderPanel />
       </main>
       <footer className="app-footer">ActionPlan → Validator → Policy Engine → Transaction Executor → File System</footer>
     </div>

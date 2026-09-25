@@ -49,6 +49,57 @@ export interface HistoryEntry {
   undo_available: boolean;
 }
 
+export type MatchType = "extension" | "name";
+export interface Rule {
+  id: string;
+  matchType: MatchType;
+  pattern: string;
+  destination: string;
+  enabled: boolean;
+  priority: number;
+}
+export interface RuleInput {
+  id?: string;
+  matchType: MatchType;
+  pattern: string;
+  destination: string;
+  enabled: boolean;
+}
+export interface RuleSuggestion {
+  fileId: number;
+  fileName: string;
+  destination: string | null;
+  ruleId: string | null;
+}
+
+export type ProviderKind =
+  | "openai"
+  | "deepseek"
+  | "xiaomi_mimo"
+  | "openai_compatible"
+  | "custom";
+export interface ProviderConfig {
+  id: string;
+  kind: ProviderKind;
+  name: string;
+  baseUrl: string;
+  model: string;
+  allowLocalHttp: boolean;
+  hasApiKey: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ProviderInput {
+  id?: string;
+  kind: ProviderKind;
+  name: string;
+  baseUrl: string;
+  model: string;
+  allowLocalHttp: boolean;
+  apiKey?: string;
+  clearApiKey: boolean;
+}
+
 export const desktopCore = {
   scanDesktop: () => invoke<ScanSummary>("scan_desktop"),
   listFiles: () => invoke<FileEntry[]>("list_files"),
@@ -61,4 +112,14 @@ export const desktopCore = {
   listHistory: () => invoke<HistoryEntry[]>("list_history"),
   undoTransaction: (transactionId: string) =>
     invoke<TransactionResult>("undo_transaction", { transactionId }),
+  listRules: () => invoke<Rule[]>("list_rules"),
+  saveRule: (input: RuleInput) => invoke<Rule>("save_rule", { input }),
+  deleteRule: (id: string) => invoke<void>("delete_rule", { id }),
+  reorderRules: (ids: string[]) => invoke<Rule[]>("reorder_rules", { ids }),
+  suggestRules: (fileIds: number[]) =>
+    invoke<RuleSuggestion[]>("suggest_rules", { fileIds }),
+  listProviders: () => invoke<ProviderConfig[]>("list_providers"),
+  saveProvider: (input: ProviderInput) =>
+    invoke<ProviderConfig>("save_provider", { input }),
+  deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
 };

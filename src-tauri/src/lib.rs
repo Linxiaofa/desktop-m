@@ -1,5 +1,6 @@
 mod core;
 mod provider;
+mod rules;
 
 use core::{
     ActionPlan, CoreResult, DesktopCore, FileEntry, HistoryEntry, PlanPreview, ScanSummary,
@@ -7,6 +8,7 @@ use core::{
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use provider::{ProviderConfig, ProviderInput};
+use rules::{Rule, RuleInput, RuleSuggestion};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
@@ -122,6 +124,37 @@ async fn delete_provider(state: State<'_, AppState>, id: String) -> Result<(), S
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn list_rules(state: State<'_, AppState>) -> Result<Vec<Rule>, String> {
+    call_core(state, |core| rules::list(core.connection())).await
+}
+
+#[tauri::command]
+async fn save_rule(state: State<'_, AppState>, input: RuleInput) -> Result<Rule, String> {
+    call_core(state, move |core| rules::upsert(core.connection(), input)).await
+}
+
+#[tauri::command]
+async fn delete_rule(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    call_core(state, move |core| rules::delete(core.connection(), &id)).await
+}
+
+#[tauri::command]
+async fn reorder_rules(state: State<'_, AppState>, ids: Vec<String>) -> Result<Vec<Rule>, String> {
+    call_core(state, move |core| rules::reorder(core.connection(), ids)).await
+}
+
+#[tauri::command]
+async fn suggest_rules(
+    state: State<'_, AppState>,
+    file_ids: Vec<i64>,
+) -> Result<Vec<RuleSuggestion>, String> {
+    call_core(state, move |core| {
+        rules::suggest(core.connection(), file_ids)
+    })
+    .await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -129,6 +162,7 @@ pub fn run() {
             let data_dir = app.path().app_local_data_dir()?;
             let mut core = DesktopCore::open(&desktop, &data_dir.join("index.sqlite"))?;
             provider::init_schema(core.connection())?;
+            rules::init_schema(core.connection())?;
             core.scan_desktop()?;
             let shared = Arc::new(Mutex::new(core));
             let (sender, receiver) = mpsc::channel();
@@ -166,7 +200,12 @@ pub fn run() {
             undo_transaction,
             list_providers,
             save_provider,
-            delete_provider
+            delete_provider,
+            list_rules,
+            save_rule,
+            delete_rule,
+            reorder_rules,
+            suggest_rules
         ])
         .run(tauri::generate_context!())
         .expect("error while running Desktop Manager");

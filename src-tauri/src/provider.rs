@@ -8,6 +8,7 @@ use keyring::{Entry, Error as KeyringError};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 const CREDENTIAL_SERVICE: &str = "desktop-manager.ai-provider";
@@ -59,6 +60,8 @@ pub struct ProviderInput {
     pub name: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
+    pub allow_local_http: bool,
     /// `None` keeps the existing key when updating a provider.
     pub api_key: Option<String>,
     /// Remove a previously saved key. Cannot be combined with `api_key`.
@@ -76,6 +79,7 @@ pub struct ProviderConfig {
     pub name: String,
     pub base_url: String,
     pub model: String,
+    pub allow_local_http: bool,
     pub has_api_key: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -119,16 +123,31 @@ pub fn init_schema(conn: &Connection) -> ProviderResult<()> {
             name TEXT NOT NULL,
             base_url TEXT NOT NULL,
             model TEXT NOT NULL,
+            allow_local_http INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );",
     )?;
+    let mut statement = conn.prepare("PRAGMA table_info(ai_providers)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_local_http = false;
+    for column in columns {
+        if column? == "allow_local_http" {
+            has_local_http = true;
+        }
+    }
+    if !has_local_http {
+        conn.execute(
+            "ALTER TABLE ai_providers ADD COLUMN allow_local_http INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
 pub fn list(conn: &Connection) -> ProviderResult<Vec<ProviderConfig>> {
     let mut statement = conn.prepare(
-        "SELECT id, kind, name, base_url, model, created_at, updated_at
+        "SELECT id, kind, name, base_url, model, allow_local_http, created_at, updated_at
          FROM ai_providers ORDER BY name COLLATE NOCASE, id",
     )?;
     let rows = statement.query_map([], |row| {
@@ -138,8 +157,9 @@ pub fn list(conn: &Connection) -> ProviderResult<Vec<ProviderConfig>> {
             name: row.get(2)?,
             base_url: row.get(3)?,
             model: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            allow_local_http: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     })?;
 
@@ -160,7 +180,7 @@ pub fn upsert(conn: &Connection, input: ProviderInput) -> ProviderResult<Provide
     };
     let name = required(input.name, "name")?;
     let model = required(input.model, "model")?;
-    let base_url = normalize_base_url(input.base_url)?;
+    let base_url = normalize_base_url(input.base_url, input.allow_local_http)?;
 
     if input.clear_api_key && input.api_key.is_some() {
         return Err(ProviderError::ConflictingKeyChange);
@@ -183,15 +203,16 @@ pub fn upsert(conn: &Connection, input: ProviderInput) -> ProviderResult<Provide
     let transaction = conn.unchecked_transaction()?;
     let now = Utc::now().to_rfc3339();
     transaction.execute(
-        "INSERT INTO ai_providers (id, kind, name, base_url, model, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+        "INSERT INTO ai_providers (id, kind, name, base_url, model, allow_local_http, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
          ON CONFLICT(id) DO UPDATE SET
            kind = excluded.kind,
            name = excluded.name,
            base_url = excluded.base_url,
            model = excluded.model,
+           allow_local_http = excluded.allow_local_http,
            updated_at = excluded.updated_at",
-        params![id, input.kind.as_db(), name, base_url, model, now],
+        params![id, input.kind.as_db(), name, base_url, model, input.allow_local_http, now],
     )?;
 
     match &key_change {
@@ -241,6 +262,7 @@ struct ProviderRow {
     name: String,
     base_url: String,
     model: String,
+    allow_local_http: bool,
     created_at: String,
     updated_at: String,
 }
@@ -254,6 +276,7 @@ impl ProviderRow {
             name: self.name,
             base_url: self.base_url,
             model: self.model,
+            allow_local_http: self.allow_local_http,
             has_api_key,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -276,7 +299,7 @@ impl KeyChange {
 fn find(conn: &Connection, id: &str) -> ProviderResult<Option<ProviderConfig>> {
     let row = conn
         .query_row(
-            "SELECT id, kind, name, base_url, model, created_at, updated_at
+            "SELECT id, kind, name, base_url, model, allow_local_http, created_at, updated_at
              FROM ai_providers WHERE id = ?1",
             [id],
             |row| {
@@ -286,8 +309,9 @@ fn find(conn: &Connection, id: &str) -> ProviderResult<Option<ProviderConfig>> {
                     name: row.get(2)?,
                     base_url: row.get(3)?,
                     model: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    allow_local_http: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )
@@ -310,31 +334,26 @@ fn validate_id(id: &str) -> ProviderResult<()> {
         .map_err(|_| ProviderError::InvalidId)
 }
 
-fn normalize_base_url(value: String) -> ProviderResult<String> {
-    let value = value.trim().trim_end_matches('/');
-    let (scheme, rest) = value
-        .split_once("://")
-        .ok_or(ProviderError::InvalidBaseUrl)?;
-    if rest.is_empty()
-        || rest
+fn normalize_base_url(value: String, allow_local_http: bool) -> ProviderResult<String> {
+    let value = value.trim();
+    let parsed = Url::parse(value).map_err(|_| ProviderError::InvalidBaseUrl)?;
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || value
             .chars()
             .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
-        || rest.contains(['@', '?', '#'])
     {
         return Err(ProviderError::InvalidBaseUrl);
     }
-    let authority = rest.split('/').next().unwrap_or_default();
-    if authority.is_empty() {
+    let host = parsed.host_str().unwrap_or_default();
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback && allow_local_http) {
         return Err(ProviderError::InvalidBaseUrl);
     }
-    let is_loopback = matches!(
-        authority.split(':').next().unwrap_or_default(),
-        "localhost" | "127.0.0.1" | "[::1]"
-    );
-    if scheme != "https" && !(scheme == "http" && is_loopback) {
-        return Err(ProviderError::InvalidBaseUrl);
-    }
-    Ok(value.to_owned())
+    Ok(parsed.as_str().trim_end_matches('/').to_owned())
 }
 
 fn credential_entry(id: &str) -> ProviderResult<Entry> {
@@ -372,14 +391,51 @@ fn restore_password(entry: &Entry, old_key: Option<&str>) -> ProviderResult<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_base_url;
+    use super::*;
 
     #[test]
     fn remote_provider_requires_https() {
-        assert!(normalize_base_url("https://api.example.com/v1/".into()).is_ok());
-        assert!(normalize_base_url("http://api.example.com/v1".into()).is_err());
-        assert!(normalize_base_url("http://localhost:11434/v1".into()).is_ok());
-        assert!(normalize_base_url("https://secret@api.example.com/v1".into()).is_err());
-        assert!(normalize_base_url("https://api.example.com/v1?key=x".into()).is_err());
+        assert!(normalize_base_url("https://api.example.com/v1/".into(), false).is_ok());
+        assert!(normalize_base_url("http://api.example.com/v1".into(), true).is_err());
+        assert!(normalize_base_url("http://localhost:11434/v1".into(), false).is_err());
+        assert!(normalize_base_url("http://localhost:11434/v1".into(), true).is_ok());
+        assert!(normalize_base_url("https://secret@api.example.com/v1".into(), false).is_err());
+        assert!(normalize_base_url("https://api.example.com/v1?key=x".into(), false).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_key_lives_in_windows_vault_not_sqlite() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let config = upsert(
+            &conn,
+            ProviderInput {
+                id: None,
+                kind: ProviderKind::Custom,
+                name: "Test provider".into(),
+                base_url: "https://example.com/v1".into(),
+                model: "test-model".into(),
+                allow_local_http: false,
+                api_key: Some("dummy-test-key".into()),
+                clear_api_key: false,
+            },
+        )
+        .unwrap();
+        assert!(config.has_api_key);
+        assert_eq!(
+            load_api_key_for_core(&config.id).unwrap().as_deref(),
+            Some("dummy-test-key")
+        );
+        let database_value: String = conn
+            .query_row(
+                "SELECT name || base_url || model FROM ai_providers WHERE id=?1",
+                [&config.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!database_value.contains("dummy-test-key"));
+        delete(&conn, &config.id).unwrap();
+        assert!(load_api_key_for_core(&config.id).unwrap().is_none());
     }
 }

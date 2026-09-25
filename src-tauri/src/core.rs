@@ -731,7 +731,7 @@ impl DesktopCore {
     }
 }
 
-fn validate_folder(value: &str) -> CoreResult<String> {
+pub(crate) fn validate_folder(value: &str) -> CoreResult<String> {
     let folder = value.trim();
     let upper = folder.trim_end_matches(['.', ' ']).to_ascii_uppercase();
     let base = upper.split('.').next().unwrap_or_default();
