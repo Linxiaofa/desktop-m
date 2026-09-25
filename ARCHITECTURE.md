@@ -21,26 +21,46 @@ even when they come from the packaged UI.
   displays plan checks and history, and calls explicit Tauri commands. It
   presents these areas as panels across one transparent, maximized Windows
   work-area window; it does not manage other applications' windows.
+- The UI layout is modular. `src/modules.ts` is the single registry of module
+  ids, titles, descriptions, and kind. The user creates and removes modules,
+  and the enabled set is persisted in local storage. A module of kind
+  `settings` may declare `autoHideWhenReady`, which collapses it to a summary
+  row once its configuration is complete. This is presentation state only: it
+  cannot add, remove, or bypass a Core command.
 - Rust Desktop Core resolves Windows Known Folder Desktop, owns the SQLite
   connection and policy checks, creates persistent immutable plan items, and
   serializes transactions through a mutex.
 - SQLite stores the current top-level index, plans, transaction journal, item
   states, history, rules, and non-secret provider metadata. WAL and
-  synchronous FULL are enabled.
+  synchronous FULL are enabled. `list_history` returns the newest 200
+  transactions and loads their items in one joined query, so the UI refresh
+  cost does not grow with total history size.
 - The watcher observes Desktop's immediate children, debounces events, and
   rescans the authoritative directory. Execute and Undo also rescan. Watcher
   events are hints; filesystem validation is authoritative.
 - Credential Manager stores each provider API key under the app's service
   name and provider UUID. Keys never enter SQLite.
+- `icons.rs` reads the real Windows Shell icon for a path, renders it into a
+  top-down 32bpp DIB, encodes a PNG, and returns a `data:` URL. It is
+  read-only, does not take the Core lock, and caches by icon identity (an
+  extension, or a full path for types with embedded icons). Shell icon queries
+  are serialized because concurrent calls fail intermittently.
 
 ## Command contract
 
 Stage 1 commands: scan_desktop, list_files, create_move_plan, validate_plan,
 execute_plan, list_history, undo_transaction. Provider configuration commands:
 list_providers, save_provider, delete_provider. Rule commands: list_rules,
-save_rule, delete_rule, reorder_rules, suggest_rules. AI commands:
-preview_ai_request and generate_ai_plan. IDs are resolved inside Core; the
-UI never supplies raw paths to the executor.
+save_rule, delete_rule, reorder_rules, suggest_rules, organize_by_rules. AI
+commands: preview_ai_request and generate_ai_plan. Icon command:
+list_file_icons, which is read-only and takes no Core lock. IDs are resolved
+inside Core; the UI never supplies raw paths to the executor.
+
+`organize_by_rules` applies every enabled rule to the whole index and returns
+one validated ActionPlan per destination (grouped, split at the 100-item batch
+limit, capped at 40 plans). It only creates plans; the UI still previews each
+group and executes it through `execute_plan`. Files that match no rule are
+reported back untouched.
 
 ## Transaction states
 

@@ -889,10 +889,12 @@ dependencies = [
 name = "desktop-manager"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "keyring",
  "notify",
+ "png 0.17.16",
  "reqwest",
  "rusqlite",
  "serde",

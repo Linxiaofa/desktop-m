@@ -5,6 +5,26 @@ indexes Desktop's immediate children, lets the user preview a Move ActionPlan,
 executes it as a journaled transaction, and offers conflict-safe Undo. Rules
 and AI can suggest a destination but cannot touch the filesystem.
 
+## Highlights
+
+- Modular workspace: every panel is a module the user creates and removes.
+  "＋ 模块" adds one, the × in a panel header removes it, and the layout is
+  remembered. Nothing is hard-wired into the window.
+- Settings modules collapse once they are configured. The AI Provider module
+  becomes a one-line summary as soon as every provider has a stored key, and
+  "管理" reopens it on demand.
+- Real Windows Shell icons in the file list, extracted per type (and per file
+  for executables and shortcuts), cached, and shown unmodified.
+- One-click Smart Organize: enabled rules are applied to the whole index and
+  grouped into per-folder plans. Every group is validated before it can run,
+  blocked groups are skipped, and unmatched files stay in place.
+- Search, sortable file list (name / modified / size / kind), and destination
+  autocomplete for existing Desktop folders.
+- Bounded, single-query history loading and batched index/rule/AI lookups keep
+  refresh cost flat as the Desktop and history grow.
+- Friendly Chinese messages for common Core errors, auto-dismissing notices,
+  Escape to clear, and automatic dark mode following the Windows theme.
+
 ## Run
 
 Prerequisites: Windows, Node.js, the MSVC Rust toolchain, Visual Studio C++

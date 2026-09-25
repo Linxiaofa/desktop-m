@@ -1,6 +1,6 @@
 //! Explicit, privacy-scoped model requests. No filesystem or shell access.
 
-use crate::core::{validate_folder, CoreError, CoreResult};
+use crate::core::{load_file_summaries, validate_folder, CoreError, CoreResult};
 use crate::provider::{self, ProviderConfig};
 use chrono::Utc;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -107,13 +107,9 @@ pub fn preview(
         return Err(CoreError::Invalid("Save a provider API key first".into()));
     }
     let mut files = Vec::with_capacity(file_ids.len());
+    let summaries = load_file_summaries(conn, &file_ids)?;
     for id in &file_ids {
-        let row: Option<(String, String)> = conn
-            .query_row("SELECT name,kind FROM files WHERE id=?1", [id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .optional()?;
-        let (name, kind) = row.ok_or(CoreError::NotFound)?;
+        let (name, kind) = summaries.get(id).cloned().ok_or(CoreError::NotFound)?;
         if kind != "file" {
             return Err(CoreError::Invalid(
                 "AI requests accept ordinary files only".into(),
@@ -202,14 +198,10 @@ pub fn prepare(conn: &Connection, id: &str) -> CoreResult<PreparedRequest> {
     if file_ids.len() != payload.files.len() {
         return Err(CoreError::Invalid("AI selection changed".into()));
     }
+    let summaries = load_file_summaries(conn, &file_ids)?;
     for (id, file) in file_ids.iter().zip(payload.files.iter()) {
-        let current: Option<(String, String)> = conn
-            .query_row("SELECT name,kind FROM files WHERE id=?1", [id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .optional()?;
-        if !current
-            .as_ref()
+        if !summaries
+            .get(id)
             .is_some_and(|(name, kind)| name == &file.name && kind == "file")
         {
             return Err(CoreError::Invalid(

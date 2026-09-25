@@ -120,6 +120,26 @@ export interface AiPlanResult {
   reason: string;
 }
 
+export interface IconRequest {
+  key: string;
+  path: string;
+  isDir: boolean;
+}
+
+export interface OrganizeGroup {
+  destination: string;
+  fileCount: number;
+  plan: ActionPlan;
+  preview: PlanPreview;
+}
+
+export interface OrganizeResult {
+  groups: OrganizeGroup[];
+  unmatched: string[];
+  totalFiles: number;
+  matchedFiles: number;
+}
+
 export const desktopCore = {
   scanDesktop: () => invoke<ScanSummary>("scan_desktop"),
   listFiles: () => invoke<FileEntry[]>("list_files"),
@@ -138,6 +158,9 @@ export const desktopCore = {
   reorderRules: (ids: string[]) => invoke<Rule[]>("reorder_rules", { ids }),
   suggestRules: (fileIds: number[]) =>
     invoke<RuleSuggestion[]>("suggest_rules", { fileIds }),
+  organizeByRules: () => invoke<OrganizeResult>("organize_by_rules"),
+  listFileIcons: (requests: IconRequest[]) =>
+    invoke<Record<string, string>>("list_file_icons", { requests }),
   listProviders: () => invoke<ProviderConfig[]>("list_providers"),
   saveProvider: (input: ProviderInput) =>
     invoke<ProviderConfig>("save_provider", { input }),

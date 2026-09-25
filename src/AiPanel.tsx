@@ -5,13 +5,19 @@ import {
   type AiRequestPreview,
   type ProviderConfig,
 } from "./api";
+import PanelHeading from "./PanelHeading";
+import { moduleDef } from "./modules";
+
+const MODULE = moduleDef("ai");
 
 export default function AiPanel({
   selectedIds,
   onPlanReady,
+  onRemove,
 }: {
   selectedIds: number[];
   onPlanReady: (result: AiPlanResult) => void;
+  onRemove?: () => void;
 }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [providerId, setProviderId] = useState("");
@@ -94,14 +100,14 @@ export default function AiPanel({
 
   return (
     <section className="panel settings-panel" aria-labelledby="ai-heading">
-      <div className="panel-heading">
-        <div>
-          <p className="section-kicker">06 / AI PLAN</p>
-          <h2 id="ai-heading">AI 整理建议</h2>
-          <p>先查看发送内容，再由模型生成待验证的移动计划。</p>
-        </div>
-        <span className="count-pill">已选 {selectedIds.length}</span>
-      </div>
+      <PanelHeading
+        kicker={MODULE.kicker}
+        title={MODULE.title}
+        titleId="ai-heading"
+        description={MODULE.description}
+        badge={<span className="count-pill">已选 {selectedIds.length}</span>}
+        onRemove={onRemove}
+      />
       <div className="settings-body">
         {error && <div className="inline-error" role="alert">{error}</div>}
         {reason && <div className="inline-notice" role="status">AI 建议：{reason}。计划已在上方等待预览和执行。</div>}

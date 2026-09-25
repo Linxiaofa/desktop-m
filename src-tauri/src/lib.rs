@@ -1,5 +1,6 @@
 mod ai;
 mod core;
+mod icons;
 mod provider;
 mod rules;
 
@@ -20,10 +21,11 @@ struct AppState {
     _watcher: Mutex<RecommendedWatcher>,
 }
 
-async fn call_core<T, F>(state: State<'_, AppState>, work: F) -> Result<T, String>
+async fn call_core<T, E, F>(state: State<'_, AppState>, work: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(&mut DesktopCore) -> CoreResult<T> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    F: FnOnce(&mut DesktopCore) -> Result<T, E> + Send + 'static,
 {
     let core = Arc::clone(&state.core);
     tauri::async_runtime::spawn_blocking(move || {
@@ -86,15 +88,7 @@ async fn undo_transaction(
 
 #[tauri::command]
 async fn list_providers(state: State<'_, AppState>) -> Result<Vec<ProviderConfig>, String> {
-    let core = Arc::clone(&state.core);
-    tauri::async_runtime::spawn_blocking(move || {
-        let core = core
-            .lock()
-            .map_err(|_| "Desktop Core lock poisoned".to_string())?;
-        provider::list(core.connection()).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    call_core(state, |core| provider::list(core.connection())).await
 }
 
 #[tauri::command]
@@ -102,28 +96,15 @@ async fn save_provider(
     state: State<'_, AppState>,
     input: ProviderInput,
 ) -> Result<ProviderConfig, String> {
-    let core = Arc::clone(&state.core);
-    tauri::async_runtime::spawn_blocking(move || {
-        let core = core
-            .lock()
-            .map_err(|_| "Desktop Core lock poisoned".to_string())?;
-        provider::upsert(core.connection(), input).map_err(|error| error.to_string())
+    call_core(state, move |core| {
+        provider::upsert(core.connection(), input)
     })
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 async fn delete_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let core = Arc::clone(&state.core);
-    tauri::async_runtime::spawn_blocking(move || {
-        let core = core
-            .lock()
-            .map_err(|_| "Desktop Core lock poisoned".to_string())?;
-        provider::delete(core.connection(), &id).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    call_core(state, move |core| provider::delete(core.connection(), &id)).await
 }
 
 #[tauri::command]
@@ -155,6 +136,32 @@ async fn suggest_rules(
         rules::suggest(core.connection(), file_ids)
     })
     .await
+}
+
+#[tauri::command]
+async fn organize_by_rules(state: State<'_, AppState>) -> Result<rules::OrganizeResult, String> {
+    call_core(state, |core| {
+        core.scan_desktop()?;
+        rules::organize(core)
+    })
+    .await
+}
+
+/// Reads the real Windows Shell icon for each requested entry. This is a
+/// read-only operation outside the file mutation boundary and does not need
+/// the Core lock, so it runs on its own blocking task.
+#[tauri::command]
+async fn list_file_icons(
+    requests: Vec<icons::IconRequest>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    if requests.len() > 512 {
+        return Err("Too many icon requests".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        icons::resolve(requests).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[derive(Serialize)]
@@ -293,6 +300,8 @@ pub fn run() {
             delete_rule,
             reorder_rules,
             suggest_rules,
+            organize_by_rules,
+            list_file_icons,
             preview_ai_request,
             generate_ai_plan
         ])

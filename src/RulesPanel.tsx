@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { desktopCore, type MatchType, type Rule, type RuleInput } from "./api";
+import PanelHeading from "./PanelHeading";
+import { moduleDef } from "./modules";
 
 const EMPTY_FORM: RuleInput = {
   matchType: "extension",
@@ -8,7 +10,15 @@ const EMPTY_FORM: RuleInput = {
   enabled: true,
 };
 
-export default function RulesPanel({ onChanged }: { onChanged: () => void }) {
+const MODULE = moduleDef("rules");
+
+export default function RulesPanel({
+  onChanged,
+  onRemove,
+}: {
+  onChanged: () => void;
+  onRemove?: () => void;
+}) {
   const [rules, setRules] = useState<Rule[]>([]);
   const [form, setForm] = useState<RuleInput>(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
@@ -87,14 +97,14 @@ export default function RulesPanel({ onChanged }: { onChanged: () => void }) {
 
   return (
     <section className="panel settings-panel" aria-labelledby="rules-heading">
-      <div className="panel-heading">
-        <div>
-          <p className="section-kicker">04 / RULES</p>
-          <h2 id="rules-heading">规则建议</h2>
-          <p>按顺序匹配，只建议目标目录，不会自动移动文件。</p>
-        </div>
-        <span className="count-pill">{rules.length} 条规则</span>
-      </div>
+      <PanelHeading
+        kicker={MODULE.kicker}
+        title={MODULE.title}
+        titleId="rules-heading"
+        description={MODULE.description}
+        badge={<span className="count-pill">{rules.length} 条规则</span>}
+        onRemove={onRemove}
+      />
       <div className="settings-body">
         {error && <div className="inline-error" role="alert">{error}</div>}
         <div className="settings-form rule-form">

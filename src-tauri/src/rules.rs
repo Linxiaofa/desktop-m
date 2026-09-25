@@ -1,9 +1,12 @@
 //! Deterministic suggestions. Rules can only propose a destination folder.
 
-use crate::core::{validate_folder, CoreError, CoreResult};
+use crate::core::{
+    load_file_summaries, validate_folder, ActionPlan, CoreError, CoreResult, DesktopCore,
+    PlanPreview,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -185,14 +188,10 @@ pub fn suggest(conn: &Connection, file_ids: Vec<i64>) -> CoreResult<Vec<RuleSugg
         return Err(CoreError::Invalid("Duplicate file selection".into()));
     }
     let rules = list(conn)?;
-    let mut results = Vec::new();
+    let summaries = load_file_summaries(conn, &file_ids)?;
+    let mut results = Vec::with_capacity(file_ids.len());
     for id in file_ids {
-        let row: Option<(String, String)> = conn
-            .query_row("SELECT name,kind FROM files WHERE id=?1", [id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .optional()?;
-        let (name, kind) = row.ok_or(CoreError::NotFound)?;
+        let (name, kind) = summaries.get(&id).cloned().ok_or(CoreError::NotFound)?;
         if kind != "file" {
             return Err(CoreError::Invalid(
                 "Rules apply to ordinary files only".into(),
@@ -210,6 +209,79 @@ pub fn suggest(conn: &Connection, file_ids: Vec<i64>) -> CoreResult<Vec<RuleSugg
         });
     }
     Ok(results)
+}
+
+/// One group of files that a single enabled rule sends to one destination.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizeGroup {
+    pub destination: String,
+    pub file_count: usize,
+    pub plan: ActionPlan,
+    pub preview: PlanPreview,
+}
+
+/// Result of applying every enabled rule to the whole Desktop index.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizeResult {
+    pub groups: Vec<OrganizeGroup>,
+    pub unmatched: Vec<String>,
+    pub total_files: usize,
+    pub matched_files: usize,
+}
+
+/// A plan cannot exceed the Core batch limit; oversized groups are split.
+const MAX_PLAN_ITEMS: usize = 100;
+/// A safety ceiling so one click cannot queue an unbounded number of plans.
+const MAX_GROUPS: usize = 40;
+
+/// Applies enabled rules to every indexed top-level file and turns the result
+/// into validated ActionPlans grouped by destination. Nothing is moved here:
+/// each group still needs the normal preview + explicit execute path.
+pub fn organize(core: &mut DesktopCore) -> CoreResult<OrganizeResult> {
+    let files = core.list_files()?;
+    let rules = list(core.connection())?;
+    let enabled: Vec<&Rule> = rules.iter().filter(|rule| rule.enabled).collect();
+    let mut grouped: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    let mut unmatched = Vec::new();
+    let mut total_files = 0;
+    for file in &files {
+        if file.kind != "file" {
+            continue;
+        }
+        total_files += 1;
+        match enabled.iter().find(|rule| matches_rule(rule, &file.name)) {
+            Some(rule) => grouped
+                .entry(rule.destination.clone())
+                .or_default()
+                .push(file.id),
+            None => unmatched.push(file.name.clone()),
+        }
+    }
+    let mut groups = Vec::new();
+    'outer: for (destination, ids) in grouped {
+        for chunk in ids.chunks(MAX_PLAN_ITEMS) {
+            if groups.len() >= MAX_GROUPS {
+                break 'outer;
+            }
+            let plan = core.create_move_plan(chunk.to_vec(), destination.clone())?;
+            let preview = core.validate_plan(&plan.id)?;
+            groups.push(OrganizeGroup {
+                destination: destination.clone(),
+                file_count: plan.items.len(),
+                plan,
+                preview,
+            });
+        }
+    }
+    let matched_files = groups.iter().map(|group| group.file_count).sum();
+    Ok(OrganizeResult {
+        groups,
+        unmatched,
+        total_files,
+        matched_files,
+    })
 }
 
 fn normalize_pattern(kind: &MatchType, value: &str) -> CoreResult<String> {
@@ -302,5 +374,54 @@ mod tests {
     fn name_globs_are_deterministic() {
         assert!(glob_matches("*report?.pdf", "annual-report1.pdf"));
         assert!(!glob_matches("*report?.pdf", "annual-report.pdf"));
+    }
+
+    #[test]
+    fn organize_groups_files_by_rule_destination() {
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let desktop = temp.path().join("Desktop");
+        fs::create_dir(&desktop).unwrap();
+        fs::write(desktop.join("report.pdf"), b"a").unwrap();
+        fs::write(desktop.join("notes.txt"), b"b").unwrap();
+        fs::write(desktop.join("misc.bin"), b"c").unwrap();
+        let mut core = DesktopCore::open(&desktop, &temp.path().join("index.sqlite")).unwrap();
+        init_schema(core.connection()).unwrap();
+        core.scan_desktop().unwrap();
+        upsert(
+            core.connection(),
+            RuleInput {
+                id: None,
+                match_type: MatchType::Extension,
+                pattern: "pdf".into(),
+                destination: "Documents".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        upsert(
+            core.connection(),
+            RuleInput {
+                id: None,
+                match_type: MatchType::Extension,
+                pattern: "txt".into(),
+                destination: "Documents".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        let result = organize(&mut core).unwrap();
+        assert_eq!(result.total_files, 3);
+        assert_eq!(result.matched_files, 2);
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].destination, "Documents");
+        assert_eq!(result.groups[0].file_count, 2);
+        assert!(result.groups[0].preview.valid);
+        assert_eq!(result.unmatched, vec!["misc.bin".to_string()]);
+        // Organizing only proposes plans; it never moves files.
+        assert!(desktop.join("report.pdf").exists());
+        assert!(!desktop.join("Documents").exists());
     }
 }

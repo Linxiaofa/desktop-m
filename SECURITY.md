@@ -44,6 +44,14 @@ requests have a 35-second timeout, no HTTP redirects, and a 128 KiB response
 limit. A model response must parse as the expected JSON shape and its folder
 name passes the same Core policy before a plan is created.
 
+## Icon extraction
+
+`list_file_icons` is read-only and sits outside the mutation boundary. It asks
+the Windows Shell for a path's icon, converts it to PNG, and returns a data
+URL. It takes no Core lock and never reads file contents. The UI treats a
+missing icon as a neutral placeholder rather than an error. Because the
+packaged CSP allows `img-src 'self' data:`, no remote image can be rendered.
+
 ## Tauri capability
 
 The packaged app has one trusted local window with core:default plus explicit

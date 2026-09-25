@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -12,20 +12,36 @@ import {
   type ScanSummary,
 } from "./api";
 import RulesPanel from "./RulesPanel";
+import OrganizePanel from "./OrganizePanel";
 import ProviderPanel from "./ProviderPanel";
 import AiPanel from "./AiPanel";
+import PanelHeading from "./PanelHeading";
+import { errorMessage } from "./errors";
+import {
+  MODULES,
+  MODULE_IDS,
+  iconKey,
+  loadEnabledModules,
+  moduleDef,
+  saveEnabledModules,
+  type ModuleId,
+} from "./modules";
 
 type BusyAction = "scan" | "refresh" | "preview" | "suggest" | "execute" | `undo:${string}` | null;
 type Notice = { kind: "success" | "info"; message: string } | null;
+type SortKey = "name" | "modified" | "size" | "kind";
 
-function errorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object" && "message" in error) {
-    return String(error.message);
-  }
-  return "操作失败，请检查 Desktop Core 日志。";
-}
+/** How many icon lookups one IPC round trip may carry. */
+const ICON_BATCH = 120;
+/** Icons are only fetched for rows the user can actually see. */
+const ICON_VISIBLE_LIMIT = 400;
+
+const SORT_LABELS: Record<SortKey, string> = {
+  name: "名称",
+  modified: "修改时间",
+  size: "大小",
+  kind: "类型",
+};
 
 function formatSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
@@ -77,39 +93,117 @@ function App() {
   const [scanSummary, setScanSummary] = useState<ScanSummary | null>(null);
   const [ruleSuggestions, setRuleSuggestions] = useState<RuleSuggestion[]>([]);
   const [busy, setBusy] = useState<BusyAction>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [organizeBusy, setOrganizeBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  // Modules the user has created. Nothing is hard-wired into the layout.
+  const [enabledModules, setEnabledModules] = useState<ModuleId[]>(loadEnabledModules);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [icons, setIcons] = useState<Record<string, string>>({});
+  const requestedIcons = useRef<Set<string>>(new Set());
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   const visibleFiles = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return files
-      .filter((file) =>
-        query
-          ? file.name.toLocaleLowerCase().includes(query) ||
-            file.path.toLocaleLowerCase().includes(query)
-          : true,
-      )
-      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
-  }, [files, search]);
+    const filtered = files.filter((file) =>
+      query
+        ? file.name.toLocaleLowerCase().includes(query) ||
+          file.path.toLocaleLowerCase().includes(query)
+        : true,
+    );
+    return filtered.sort((a, b) => {
+      switch (sortKey) {
+        case "modified":
+          return b.modified_at.localeCompare(a.modified_at);
+        case "size":
+          return b.size - a.size;
+        case "kind":
+          return (
+            a.kind.localeCompare(b.kind) ||
+            a.name.localeCompare(b.name, "zh-CN", { numeric: true })
+          );
+        default:
+          return a.name.localeCompare(b.name, "zh-CN", { numeric: true });
+      }
+    });
+  }, [files, search, sortKey]);
 
+  const destinationFolders = useMemo(
+    () => files.filter((file) => file.kind === "directory").map((file) => file.name),
+    [files],
+  );
   const selectableFiles = visibleFiles.filter((file) => file.kind === "file");
   const aiSelectedIds = [...selectedIds].sort((a, b) => a - b);
   const allVisibleSelected =
     selectableFiles.length > 0 && selectableFiles.every((file) => selectedIds.has(file.id));
-  const isBusy = busy !== null;
+  const isBusy = busy !== null || organizeBusy;
   const canExecute = Boolean(plan && preview?.valid && preview.plan_id === plan.id && !isBusy);
+  const enabled = useMemo(() => new Set(enabledModules), [enabledModules]);
+  const availableModules = MODULES.filter((module) => !enabled.has(module.id));
 
-  async function refreshData(): Promise<void> {
-    const [nextFiles, nextHistory] = await Promise.all([
-      desktopCore.listFiles(),
-      desktopCore.listHistory(),
-    ]);
+  /** Adds a module if it is missing, keeping registry order for a stable layout. */
+  function ensureModule(id: ModuleId): void {
+    setEnabledModules((current) =>
+      current.includes(id) ? current : MODULE_IDS.filter((each) => each === id || current.includes(each)),
+    );
+  }
+
+  function addModule(id: ModuleId): void {
+    setPickerOpen(false);
+    ensureModule(id);
+  }
+
+  function removeModule(id: ModuleId): void {
+    setEnabledModules((current) => current.filter((each) => each !== id));
+  }
+
+  function resetModules(): void {
+    setPickerOpen(false);
+    setEnabledModules(MODULES.filter((module) => module.defaultEnabled).map((module) => module.id));
+  }
+
+  useEffect(() => {
+    saveEnabledModules(enabledModules);
+  }, [enabledModules]);
+
+  // Real Shell icons are fetched in batches and cached by the backend, so the
+  // list only asks once per icon identity.
+  useEffect(() => {
+    const missing = new Map<string, { key: string; path: string; isDir: boolean }>();
+    for (const file of visibleFiles.slice(0, ICON_VISIBLE_LIMIT)) {
+      const key = iconKey(file);
+      if (icons[key] || requestedIcons.current.has(key)) continue;
+      missing.set(key, { key, path: file.path, isDir: file.kind === "directory" });
+      if (missing.size >= ICON_BATCH) break;
+    }
+    if (missing.size === 0) return;
+    const batch = [...missing.values()];
+    batch.forEach((item) => requestedIcons.current.add(item.key));
+    void desktopCore
+      .listFileIcons(batch)
+      .then((resolved) => setIcons((current) => ({ ...current, ...resolved })))
+      .catch(() => {
+        // A failed icon lookup must never block the file list.
+        batch.forEach((item) => requestedIcons.current.delete(item.key));
+      });
+  }, [visibleFiles, icons]);
+
+  async function refreshFiles(): Promise<void> {
+    const nextFiles = await desktopCore.listFiles();
     setFiles(nextFiles);
-    setHistory(nextHistory);
     setConnected(true);
     const available = new Set(nextFiles.map((file) => file.id));
     setSelectedIds((current) => new Set([...current].filter((id) => available.has(id))));
+  }
+
+  async function refreshHistory(): Promise<void> {
+    setHistory(await desktopCore.listHistory());
+  }
+
+  async function refreshData(): Promise<void> {
+    await Promise.all([refreshFiles(), refreshHistory()]);
   }
 
   async function handleScan(): Promise<void> {
@@ -157,7 +251,9 @@ function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("desktop-index-updated", () => {
-      void refreshData().catch((cause) => setError(errorMessage(cause)));
+      // A watcher event only changes the file index, not history, so the
+      // expensive history/undo checks are skipped here.
+      void refreshFiles().catch((cause) => setError(errorMessage(cause)));
     }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
@@ -169,6 +265,35 @@ function App() {
     // The event refreshes the authoritative SQLite view after watcher updates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key !== "Escape") return;
+      setError(null);
+      setNotice(null);
+      setPickerOpen(false);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // The header uses backdrop-filter, which makes it a containing block for
+  // fixed children, so the menu closes from a document listener instead of a
+  // full-screen overlay.
+  useEffect(() => {
+    if (!pickerOpen) return;
+    function handlePointerDown(event: PointerEvent): void {
+      if (!pickerRef.current?.contains(event.target as Node)) setPickerOpen(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [pickerOpen]);
 
   function invalidatePlan(): void {
     setPlan(null);
@@ -244,6 +369,7 @@ function App() {
         setDestination(first);
         setPlan(null);
         setPreview(null);
+        ensureModule("plan");
         setNotice({ kind: "info", message: "所有选中文件均建议 Desktop\\" + first + "。请创建计划并预览。" });
       } else {
         setNotice({ kind: "info", message: "选中文件没有统一的规则建议，请查看逐项结果或手动填写目录。" });
@@ -261,11 +387,16 @@ function App() {
     setPreview(result.preview);
     setRuleSuggestions([]);
     setError(null);
+    // A plan the user cannot see would be a dead end, so the module is created
+    // on demand before the view scrolls to it.
+    ensureModule("plan");
     setNotice({
       kind: "info",
       message: "AI 建议已转为 Desktop Core ActionPlan。请检查上方预览，再决定是否执行。",
     });
-    document.getElementById("plan-heading")?.scrollIntoView({ behavior: "smooth" });
+    window.requestAnimationFrame(() => {
+      document.getElementById("plan-heading")?.scrollIntoView({ behavior: "smooth" });
+    });
   }
 
   async function handleExecute(): Promise<void> {
@@ -311,6 +442,17 @@ function App() {
     }
   }
 
+  function handleOrganizeExecuted(summary: { plans: number; files: number }): void {
+    setPlan(null);
+    setPreview(null);
+    setSelectedIds(new Set());
+    void refreshData().catch((cause) => setError(errorMessage(cause)));
+    setNotice({
+      kind: "success",
+      message: `已按规则执行 ${summary.plans} 个事务，移动 ${summary.files} 个文件。可在历史中撤销。`,
+    });
+  }
+
   async function handleWindowAction(action: "minimize" | "close"): Promise<void> {
     try {
       const window = getCurrentWindow();
@@ -336,6 +478,45 @@ function App() {
             <span className="status-dot" aria-hidden="true" />
             {connected ? "Desktop Core 已连接" : "等待 Desktop Core"}
           </span>
+          <div className="module-picker" ref={pickerRef}>
+            <button
+              className="button button-quiet"
+              onClick={() => setPickerOpen((open) => !open)}
+              aria-expanded={pickerOpen}
+              aria-haspopup="menu"
+            >
+              ＋ 模块
+            </button>
+            {pickerOpen && (
+              <div className="module-menu" role="menu">
+                <p className="module-menu-title">
+                  已启用 {enabledModules.length} / {MODULES.length} 个模块
+                </p>
+                {availableModules.length === 0 ? (
+                  <p className="module-menu-empty">全部模块都已显示。</p>
+                ) : (
+                  availableModules.map((module) => (
+                    <button
+                      key={module.id}
+                      type="button"
+                      role="menuitem"
+                      className="module-menu-item"
+                      onClick={() => addModule(module.id)}
+                    >
+                      <strong>{module.title}</strong>
+                      <small>{module.description}</small>
+                      <span className="module-menu-tag">
+                        {module.kind === "settings" ? "配置" : "工作"}
+                      </span>
+                    </button>
+                  ))
+                )}
+                <button type="button" className="module-menu-reset" onClick={resetModules}>
+                  恢复默认布局
+                </button>
+              </div>
+            )}
+          </div>
           <button className="button button-quiet" onClick={handleRefresh} disabled={isBusy}>
             {busy === "refresh" ? "刷新中…" : "刷新"}
           </button>
@@ -381,15 +562,16 @@ function App() {
           )}
         </div>}
 
+          {enabled.has("files") && (
           <section className="panel files-panel" aria-labelledby="files-heading">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">01 / SELECT</p>
-                <h2 id="files-heading">桌面文件</h2>
-                <p>从 SQLite 索引中选择要移动的文件。</p>
-              </div>
-              <span className="count-pill">已选 {selectedIds.size}</span>
-            </div>
+            <PanelHeading
+              kicker={moduleDef("files").kicker}
+              title={moduleDef("files").title}
+              titleId="files-heading"
+              description={moduleDef("files").description}
+              badge={<span className="count-pill">已选 {selectedIds.size}</span>}
+              onRemove={() => removeModule("files")}
+            />
             <div className="file-toolbar">
               <label className="search-field">
                 <span aria-hidden="true" className="search-glyph">⌕</span>
@@ -410,6 +592,18 @@ function App() {
                 />
                 <span>全选当前结果</span>
               </label>
+              <label className="sort-field">
+                <span className="sort-label">排序</span>
+                <select
+                  value={sortKey}
+                  onChange={(event) => setSortKey(event.target.value as SortKey)}
+                  aria-label="文件排序方式"
+                >
+                  {(Object.keys(SORT_LABELS) as SortKey[]).map((key) => (
+                    <option key={key} value={key}>{SORT_LABELS[key]}</option>
+                  ))}
+                </select>
+              </label>
             </div>
             <div className="file-list" aria-busy={busy === "scan" || busy === "refresh"}>
               {visibleFiles.length === 0 ? (
@@ -428,7 +622,11 @@ function App() {
                       disabled={isBusy || file.kind !== "file"}
                       aria-label={`选择 ${file.name}`}
                     />
-                    <span className="file-icon" aria-hidden="true">{file.kind === "directory" ? "▣" : "▤"}</span>
+                    <span className="file-icon" aria-hidden="true">
+                      {icons[iconKey(file)]
+                        ? <img src={icons[iconKey(file)]} alt="" width={16} height={16} draggable={false} />
+                        : <span className="file-icon-pending" />}
+                    </span>
                     <span className="file-main">
                       <strong title={file.name}>{file.name}</strong>
                       <small title={file.path}>{file.path}</small>
@@ -443,15 +641,17 @@ function App() {
             </div>
             <div className="panel-footer">文件内容不会发送给 AI；所有移动均由 Desktop Core 执行。</div>
           </section>
+          )}
 
+          {enabled.has("plan") && (
           <section className="panel plan-panel" aria-labelledby="plan-heading">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">02 / PLAN & VALIDATE</p>
-                <h2 id="plan-heading">移动计划</h2>
-                <p>目标目录必须位于当前 Desktop 下。</p>
-              </div>
-            </div>
+            <PanelHeading
+              kicker={moduleDef("plan").kicker}
+              title={moduleDef("plan").title}
+              titleId="plan-heading"
+              description={moduleDef("plan").description}
+              onRemove={() => removeModule("plan")}
+            />
             <div className="plan-form">
               <label htmlFor="destination">目标目录（相对 Desktop）</label>
               <div className="destination-field">
@@ -467,9 +667,13 @@ function App() {
                   placeholder="例如：已整理"
                   spellCheck={false}
                   disabled={isBusy}
+                  list="desktop-folders"
                 />
+                <datalist id="desktop-folders">
+                  {destinationFolders.map((name) => <option key={name} value={name} />)}
+                </datalist>
               </div>
-              <p className="field-help">仅填写单层文件夹名称；Desktop Core 会检查路径边界、文件状态及目标冲突。</p>
+              <p className="field-help">仅填写单层文件夹名称；Desktop Core 会检查路径边界、文件状态及目标冲突。输入时会提示 Desktop 下已有的文件夹。</p>
               <button className="button button-quiet rule-suggest-button" onClick={handleRuleSuggestion} disabled={isBusy || selectedIds.size === 0}>
                 {busy === "suggest" ? "正在匹配…" : "查看规则建议"}
               </button>
@@ -527,15 +731,18 @@ function App() {
               <span>只有通过策略验证的计划才能执行。</span>
             </div>
           </section>
+          )}
+
+        {enabled.has("history") && (
         <section className="panel history-panel" aria-labelledby="history-heading">
-          <div className="panel-heading history-heading">
-            <div>
-              <p className="section-kicker">03 / HISTORY & UNDO</p>
-              <h2 id="history-heading">操作历史</h2>
-              <p>每次移动都以事务记录，符合条件时可撤销。</p>
-            </div>
-            <span className="count-pill">{history.length} 条记录</span>
-          </div>
+          <PanelHeading
+            kicker={moduleDef("history").kicker}
+            title={moduleDef("history").title}
+            titleId="history-heading"
+            description={moduleDef("history").description}
+            badge={<span className="count-pill">{history.length} 条记录</span>}
+            onRemove={() => removeModule("history")}
+          />
           {history.length === 0 ? (
             <div className="history-empty">还没有执行过移动事务。</div>
           ) : (
@@ -561,9 +768,40 @@ function App() {
             </div>
           )}
         </section>
-        <RulesPanel onChanged={() => setRuleSuggestions([])} />
-        <ProviderPanel />
-        <AiPanel selectedIds={aiSelectedIds} onPlanReady={handleAiPlanReady} />
+        )}
+
+        {enabled.has("organize") && (
+          <OrganizePanel
+            disabled={busy !== null}
+            onBusyChange={setOrganizeBusy}
+            onExecuted={handleOrganizeExecuted}
+            onRemove={() => removeModule("organize")}
+          />
+        )}
+        {enabled.has("rules") && (
+          <RulesPanel
+            onChanged={() => setRuleSuggestions([])}
+            onRemove={() => removeModule("rules")}
+          />
+        )}
+        {enabled.has("providers") && (
+          <ProviderPanel onRemove={() => removeModule("providers")} />
+        )}
+        {enabled.has("ai") && (
+          <AiPanel
+            selectedIds={aiSelectedIds}
+            onPlanReady={handleAiPlanReady}
+            onRemove={() => removeModule("ai")}
+          />
+        )}
+
+        {enabledModules.length === 0 && (
+          <div className="workspace-empty">
+            <strong>当前没有显示任何模块</strong>
+            <span>点击右上角「＋ 模块」创建需要的面板。</span>
+            <button className="button button-primary" onClick={resetModules}>恢复默认布局</button>
+          </div>
+        )}
       </main>
       <footer className="app-footer">ActionPlan → Validator → Policy Engine → Transaction Executor → File System</footer>
     </div>

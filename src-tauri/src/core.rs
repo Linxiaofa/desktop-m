@@ -2,9 +2,9 @@
 //! UI, rules, skills, and model output can submit plans, never filesystem operations.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -94,6 +94,18 @@ struct StoredItem {
     destination: PathBuf,
     expected_size: i64,
     expected_modified_ns: i64,
+}
+
+/// Bounded history keeps the joined query and per-item undo checks cheap even
+/// after months of use. Newer transactions always win.
+const HISTORY_LIMIT: i64 = 200;
+
+struct HistoryGroup {
+    id: String,
+    created_at: String,
+    status: String,
+    folder: String,
+    items: Vec<StoredItem>,
 }
 
 pub struct DesktopCore {
@@ -205,16 +217,33 @@ impl DesktopCore {
             ));
         }
         let transaction = self.conn.transaction()?;
+        // Prefetch the whole index once so the diff is a single query instead
+        // of one SELECT per Desktop entry (N+1 -> 1).
+        let mut previous_index: HashMap<String, (String, i64, i64)> = HashMap::new();
+        {
+            let mut statement =
+                transaction.prepare("SELECT path, kind, size, modified_ns FROM files")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ),
+                ))
+            })?;
+            for row in rows {
+                let (path, snapshot) = row?;
+                previous_index.insert(path, snapshot);
+            }
+        }
         let mut updated = 0;
         for (path, name, kind, size, modified_at, modified_ns) in &entries {
-            let previous: Option<(String, i64, i64)> = transaction
-                .query_row(
-                    "SELECT kind, size, modified_ns FROM files WHERE path=?1",
-                    [path],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            if previous.as_ref() != Some(&(kind.to_string(), *size, *modified_ns)) {
+            let changed = previous_index
+                .get(path)
+                .is_none_or(|snapshot| snapshot != &(kind.to_string(), *size, *modified_ns));
+            if changed {
                 updated += 1;
             }
             transaction.execute(
@@ -517,29 +546,78 @@ impl DesktopCore {
     }
 
     pub fn list_history(&self) -> CoreResult<Vec<HistoryEntry>> {
+        // One joined query loads the newest transactions and their items
+        // together, replacing the previous one-query-per-transaction pattern.
         let mut statement = self.conn.prepare(
-            "SELECT id,created_at,status,destination_folder,
-                    (SELECT COUNT(*) FROM transaction_items WHERE transaction_id=transactions.id)
-             FROM transactions ORDER BY created_at DESC",
+            "SELECT t.id,t.created_at,t.status,t.destination_folder,
+                    ti.source,ti.destination,ti.expected_size,ti.expected_modified_ns
+             FROM (SELECT id,created_at,status,destination_folder FROM transactions
+                   ORDER BY created_at DESC LIMIT ?1) AS t
+             LEFT JOIN transaction_items AS ti ON ti.transaction_id = t.id
+             ORDER BY t.created_at DESC, t.id, ti.ordinal",
         )?;
-        let rows = statement.query_map([], |row| {
+        let rows = statement.query_map([HISTORY_LIMIT], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?;
-        let mut history = Vec::new();
+        let mut grouped: Vec<HistoryGroup> = Vec::new();
         for row in rows {
-            let (id, created_at, status, folder, count) = row?;
-            let undo_available = status == "executed" && self.can_undo(&id)?;
+            let (id, created_at, status, folder, source, destination, size, modified_ns) = row?;
+            let item = match (source, destination, size, modified_ns) {
+                (
+                    Some(source),
+                    Some(destination),
+                    Some(expected_size),
+                    Some(expected_modified_ns),
+                ) => StoredItem {
+                    file_id: 0,
+                    source: PathBuf::from(source),
+                    destination: PathBuf::from(destination),
+                    expected_size,
+                    expected_modified_ns,
+                },
+                _ => {
+                    // A transaction without journaled items still lists.
+                    grouped.push(HistoryGroup {
+                        id,
+                        created_at,
+                        status,
+                        folder,
+                        items: Vec::new(),
+                    });
+                    continue;
+                }
+            };
+            match grouped.last_mut() {
+                Some(group) if group.id == id => group.items.push(item),
+                _ => grouped.push(HistoryGroup {
+                    id,
+                    created_at,
+                    status,
+                    folder,
+                    items: vec![item],
+                }),
+            }
+        }
+        let mut history = Vec::with_capacity(grouped.len());
+        for group in grouped {
+            // Only executed transactions can be undone; other states skip the
+            // filesystem checks entirely.
+            let undo_available =
+                group.status == "executed" && self.transaction_items_undoable(&group.items)?;
             history.push(HistoryEntry {
-                id,
-                created_at,
-                status,
-                summary: format!("{count} 个文件 → Desktop\\{folder}"),
+                id: group.id,
+                created_at: group.created_at,
+                status: group.status,
+                summary: format!("{} 个文件 → Desktop\\{}", group.items.len(), group.folder),
                 undo_available,
             });
         }
@@ -628,6 +706,12 @@ impl DesktopCore {
 
     fn can_undo(&self, transaction_id: &str) -> CoreResult<bool> {
         let items = self.load_transaction_items(transaction_id)?;
+        self.transaction_items_undoable(&items)
+    }
+
+    /// Shared undo eligibility check so `list_history` can reuse it with items
+    /// it already loaded instead of querying the database again.
+    fn transaction_items_undoable(&self, items: &[StoredItem]) -> CoreResult<bool> {
         if items.is_empty() {
             return Ok(false);
         }
@@ -812,6 +896,34 @@ impl DesktopCore {
         }
         Ok(())
     }
+}
+
+/// Loads `(name, kind)` for many file IDs in one query. Used by rules and AI
+/// previews so a 100-file selection costs one statement instead of 100.
+pub(crate) fn load_file_summaries(
+    conn: &Connection,
+    ids: &[i64],
+) -> CoreResult<HashMap<i64, (String, String)>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT id,name,kind FROM files WHERE id IN ({placeholders})");
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(ids.iter()), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+        ))
+    })?;
+    let mut summaries = HashMap::with_capacity(ids.len());
+    for row in rows {
+        let (id, value) = row?;
+        summaries.insert(id, value);
+    }
+    Ok(summaries)
 }
 
 pub(crate) fn validate_folder(value: &str) -> CoreResult<String> {

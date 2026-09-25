@@ -5,6 +5,10 @@ import {
   type ProviderInput,
   type ProviderKind,
 } from "./api";
+import PanelHeading from "./PanelHeading";
+import { moduleDef } from "./modules";
+
+const MODULE = moduleDef("providers");
 
 const PRESETS: Record<ProviderKind, { name: string; baseUrl: string; model: string }> = {
   openai: {
@@ -46,12 +50,18 @@ function emptyForm(): Form {
   };
 }
 
-export default function ProviderPanel() {
+export default function ProviderPanel({ onRemove }: { onRemove?: () => void }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [form, setForm] = useState<Form>(emptyForm);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  // A settings module that is fully configured collapses to a summary row so a
+  // finished setup stops occupying the desktop. "管理" reopens it on demand.
+  const [manuallyExpanded, setManuallyExpanded] = useState(false);
+  const configured =
+    providers.length > 0 && providers.every((provider) => provider.hasApiKey);
+  const collapsed = MODULE.autoHideWhenReady && configured && !manuallyExpanded;
 
   async function reload() {
     setProviders(await desktopCore.listProviders());
@@ -103,6 +113,7 @@ export default function ProviderPanel() {
       };
       await desktopCore.saveProvider(input);
       setForm(emptyForm());
+      setManuallyExpanded(false);
       await reload();
       setNotice("Provider 配置已保存。API Key 仅存于 Windows 凭据管理器。");
     } catch (cause) {
@@ -120,6 +131,7 @@ export default function ProviderPanel() {
     try {
       await desktopCore.deleteProvider(id);
       if (form.id === id) setForm(emptyForm());
+      setManuallyExpanded(true);
       await reload();
       setNotice("Provider 配置及其凭据已删除。");
     } catch (cause) {
@@ -131,14 +143,29 @@ export default function ProviderPanel() {
 
   return (
     <section className="panel settings-panel" aria-labelledby="providers-heading">
-      <div className="panel-heading">
-        <div>
-          <p className="section-kicker">05 / AI PROVIDERS</p>
-          <h2 id="providers-heading">AI Provider</h2>
-          <p>配置模型连接。Provider 不能直接执行文件操作。</p>
+      <PanelHeading
+        kicker={MODULE.kicker}
+        title={MODULE.title}
+        titleId="providers-heading"
+        description={MODULE.description}
+        badge={<span className="count-pill">{providers.length} 个配置</span>}
+        onRemove={onRemove}
+      />
+      {collapsed ? (
+        <div className="settings-collapsed">
+          <span className="configured-mark" aria-hidden="true">✓</span>
+          <div className="settings-collapsed-text">
+            <strong>已完成配置</strong>
+            <small>{providers.map((provider) => provider.name).join("、")} · 凭据已保存</small>
+          </div>
+          <button
+            className="button button-small button-outline"
+            onClick={() => setManuallyExpanded(true)}
+          >
+            管理
+          </button>
         </div>
-        <span className="count-pill">{providers.length} 个配置</span>
-      </div>
+      ) : (
       <div className="settings-body">
         {error && <div className="inline-error" role="alert">{error}</div>}
         {notice && <div className="inline-notice" role="status">{notice}</div>}
@@ -171,6 +198,7 @@ export default function ProviderPanel() {
           <div className="form-actions wide-field">
             <button className="button button-primary" onClick={() => void save()} disabled={busy || !form.name.trim() || !form.baseUrl.trim() || !form.model.trim()}>{form.id ? "保存配置" : "添加 Provider"}</button>
             {form.id && <button className="button button-quiet" onClick={() => setForm(emptyForm())} disabled={busy}>取消编辑</button>}
+            {configured && <button className="button button-quiet" onClick={() => setManuallyExpanded(false)} disabled={busy}>收起</button>}
           </div>
         </div>
         {providers.length === 0 && <p className="settings-empty">尚未配置 Provider。API Key 不会保存在 SQLite 中。</p>}
@@ -188,6 +216,7 @@ export default function ProviderPanel() {
           </div>)}
         </div>}
       </div>
+      )}
     </section>
   );
 }
