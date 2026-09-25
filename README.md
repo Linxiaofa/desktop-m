@@ -10,6 +10,14 @@ and AI can suggest a destination but cannot touch the filesystem.
 Prerequisites: Windows, Node.js, the MSVC Rust toolchain, Visual Studio C++
 Build Tools, and WebView2.
 
+For a ready-to-use Windows installation, double-click the generated
+`src-tauri/target/release/bundle/nsis/Desktop Manager_0.1.0_x64-setup.exe`.
+It installs for the current user without administrator rights and creates
+Desktop and Start Menu shortcuts. Use either shortcut to start the app.
+The installer is currently unsigned, so Windows may show a publisher warning.
+
+To develop from source:
+
     npm install
     npm run tauri -- dev
 
@@ -21,12 +29,13 @@ Build Tools, and WebView2.
     cargo check
     cargo test
     cd ..
-    npm run tauri -- build --debug
+    npm run tauri -- build
 
-The final command writes a runnable debug executable at
-src-tauri/target/debug/desktop-manager.exe. Bundled installers are not
-configured yet. SQLite is stored under the current user's local app data
-directory; provider API keys are stored in Windows Credential Manager.
+The final command writes a Windows NSIS installer at
+`src-tauri/target/release/bundle/nsis/` and a runnable executable at
+`src-tauri/target/release/desktop-manager.exe`. SQLite is stored under the
+current user's local app data directory; provider API keys are stored in
+Windows Credential Manager.
 
 ## Safety and scope
 
