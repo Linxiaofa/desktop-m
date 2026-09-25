@@ -170,6 +170,11 @@ pub fn list(conn: &Connection) -> ProviderResult<Vec<ProviderConfig>> {
     Ok(providers)
 }
 
+pub(crate) fn get(conn: &Connection, id: &str) -> ProviderResult<ProviderConfig> {
+    validate_id(id)?;
+    find(conn, id)?.ok_or(ProviderError::NotFound)
+}
+
 pub fn upsert(conn: &Connection, input: ProviderInput) -> ProviderResult<ProviderConfig> {
     let id = match input.id {
         Some(id) => {

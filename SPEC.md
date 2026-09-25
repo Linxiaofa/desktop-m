@@ -65,3 +65,8 @@ per-user filesystem permissions rather than additional database encryption.
 Each stage must compile and pass relevant tests. A Git commit is a rollback
 point for each completed stage. Features not yet implemented are called out
 in the delivery report.
+
+The current implementation contains all three stages. Provider requests use
+the OpenAI-compatible Chat Completions protocol. Live calls require the user
+to configure a valid endpoint and key; automated tests use a local mock
+provider and do not spend external API credits.

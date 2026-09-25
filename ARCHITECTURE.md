@@ -35,19 +35,25 @@ even when they come from the packaged UI.
 
 Stage 1 commands: scan_desktop, list_files, create_move_plan, validate_plan,
 execute_plan, list_history, undo_transaction. Provider configuration commands:
-list_providers, save_provider, delete_provider. IDs are resolved inside Core;
-the UI never supplies raw paths to the executor.
+list_providers, save_provider, delete_provider. Rule commands: list_rules,
+save_rule, delete_rule, reorder_rules, suggest_rules. AI commands:
+preview_ai_request and generate_ai_plan. IDs are resolved inside Core; the
+UI never supplies raw paths to the executor.
 
 ## Transaction states
 
 An ActionPlan starts as draft. Execution stores an executing journal before
 the first rename, then marks each moved item. Success marks the transaction
 and plan executed. Failure compensates previous moves in reverse order; an
-uncompensated or interrupted operation is marked recovery_needed and cannot
-be silently replayed. Undo prevalidates all items, records undoing, renames
-in reverse order, and ends at undone. Conflicting Undo leaves data untouched;
+uncompensated operation is marked recovery_needed. On restart, interrupted
+operations are reconciled conservatively: unchanged moved items are restored
+to their vacant original paths, while ambiguous states remain
+recovery_needed. Undo prevalidates all items, records undoing, renames in
+reverse order, and ends at undone. Conflicting Undo leaves data untouched;
 a mid-Undo failure is compensated where possible.
 
 SQLite and NTFS cannot share one atomic commit. The journal is a durable
 record of intended and observed steps, not a cross-system ACID guarantee.
 Recovery-needed records require explicit inspection before further action.
+An AI request has previewed, sending, completed, rejected, failed, and
+interrupted states. It is never retried automatically after a crash.

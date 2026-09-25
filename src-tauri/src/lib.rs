@@ -1,14 +1,16 @@
+mod ai;
 mod core;
 mod provider;
 mod rules;
 
 use core::{
-    ActionPlan, CoreResult, DesktopCore, FileEntry, HistoryEntry, PlanPreview, ScanSummary,
-    TransactionResult,
+    ActionPlan, CoreError, CoreResult, DesktopCore, FileEntry, HistoryEntry, PlanPreview,
+    ScanSummary, TransactionResult,
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use provider::{ProviderConfig, ProviderInput};
 use rules::{Rule, RuleInput, RuleSuggestion};
+use serde::Serialize;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
@@ -155,6 +157,90 @@ async fn suggest_rules(
     .await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiPlanResult {
+    plan: ActionPlan,
+    preview: PlanPreview,
+    destination: String,
+    reason: String,
+}
+
+#[tauri::command]
+async fn preview_ai_request(
+    state: State<'_, AppState>,
+    file_ids: Vec<i64>,
+    provider_id: String,
+    instruction: String,
+) -> Result<ai::AiRequestPreview, String> {
+    call_core(state, move |core| {
+        core.scan_desktop()?;
+        ai::preview(core.connection(), file_ids, provider_id, instruction)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn generate_ai_plan(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<AiPlanResult, String> {
+    let shared = Arc::clone(&state.core);
+    let prepare_core = Arc::clone(&shared);
+    let prepare_id = request_id.clone();
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        let mut core = prepare_core
+            .lock()
+            .map_err(|_| "Desktop Core lock poisoned".to_string())?;
+        core.scan_desktop().map_err(|error| error.to_string())?;
+        ai::prepare(core.connection(), &prepare_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let suggestion = match ai::request_model(&prepared).await {
+        Ok(suggestion) => suggestion,
+        Err(error) => {
+            let failed_core = Arc::clone(&shared);
+            let failed_id = request_id.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                if let Ok(core) = failed_core.lock() {
+                    let _ = ai::finish(core.connection(), &failed_id, "failed", None);
+                }
+            })
+            .await;
+            return Err(error.to_string());
+        }
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut core = shared
+            .lock()
+            .map_err(|_| "Desktop Core lock poisoned".to_string())?;
+        let result = (|| -> CoreResult<AiPlanResult> {
+            core.scan_desktop()?;
+            let plan = core.create_move_plan(prepared.file_ids, suggestion.destination.clone())?;
+            let preview = core.validate_plan(&plan.id)?;
+            if !preview.valid {
+                return Err(CoreError::Invalid(preview.issues.join("; ")));
+            }
+            ai::finish(core.connection(), &request_id, "completed", Some(&plan.id))?;
+            Ok(AiPlanResult {
+                plan,
+                preview,
+                destination: suggestion.destination,
+                reason: suggestion.reason,
+            })
+        })();
+        if result.is_err() {
+            let _ = ai::finish(core.connection(), &request_id, "rejected", None);
+        }
+        result.map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -163,6 +249,7 @@ pub fn run() {
             let mut core = DesktopCore::open(&desktop, &data_dir.join("index.sqlite"))?;
             provider::init_schema(core.connection())?;
             rules::init_schema(core.connection())?;
+            ai::init_schema(core.connection())?;
             core.scan_desktop()?;
             let shared = Arc::new(Mutex::new(core));
             let (sender, receiver) = mpsc::channel();
@@ -205,7 +292,9 @@ pub fn run() {
             save_rule,
             delete_rule,
             reorder_rules,
-            suggest_rules
+            suggest_rules,
+            preview_ai_request,
+            generate_ai_plan
         ])
         .run(tauri::generate_context!())
         .expect("error while running Desktop Manager");

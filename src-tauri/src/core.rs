@@ -453,6 +453,7 @@ impl DesktopCore {
         let attempt = (|| -> CoreResult<()> {
             self.check_destination_dir(&destination_dir)?;
             for (ordinal, item) in items.iter().enumerate() {
+                self.check_destination_dir(&destination_dir)?;
                 check_regular_file(&item.source, item.expected_size, item.expected_modified_ns)?;
                 if path_exists(&item.destination)? {
                     return Err(CoreError::Invalid(format!(
@@ -467,6 +468,11 @@ impl DesktopCore {
                     params![transaction_id, ordinal as i64],
                 )?;
             }
+            self.set_transaction_status(&transaction_id, "executed")?;
+            self.conn.execute(
+                "UPDATE action_plans SET status='executed' WHERE id=?1",
+                [plan_id],
+            )?;
             Ok(())
         })();
         if let Err(error) = attempt {
@@ -502,11 +508,6 @@ impl DesktopCore {
                 transaction_id, status, error
             )));
         }
-        self.set_transaction_status(&transaction_id, "executed")?;
-        self.conn.execute(
-            "UPDATE action_plans SET status='executed' WHERE id=?1",
-            [plan_id],
-        )?;
         let _ = self.scan_desktop();
         Ok(TransactionResult {
             id: transaction_id,
@@ -569,6 +570,7 @@ impl DesktopCore {
         let attempt = (|| -> CoreResult<()> {
             for ordinal in (0..items.len()).rev() {
                 let item = &items[ordinal];
+                self.check_destination_dir(&self.desktop.join(&folder))?;
                 check_regular_file(
                     &item.destination,
                     item.expected_size,
@@ -585,6 +587,7 @@ impl DesktopCore {
                     params![transaction_id, ordinal as i64],
                 )?;
             }
+            self.set_transaction_status(transaction_id, "undone")?;
             Ok(())
         })();
         if let Err(error) = attempt {
@@ -612,7 +615,6 @@ impl DesktopCore {
             let _ = self.scan_desktop();
             return Err(CoreError::Invalid(format!("Undo failed: {error}")));
         }
-        self.set_transaction_status(transaction_id, "undone")?;
         if created_dir {
             let _ = fs::remove_dir(self.desktop.join(folder));
         }
@@ -632,6 +634,10 @@ impl DesktopCore {
         for item in items {
             if item.source.parent() != Some(self.desktop.as_path())
                 || item.destination.parent().and_then(Path::parent) != Some(self.desktop.as_path())
+                || item
+                    .destination
+                    .parent()
+                    .is_none_or(|folder| self.check_destination_dir(folder).is_err())
                 || check_regular_file(
                     &item.destination,
                     item.expected_size,
@@ -719,14 +725,91 @@ impl DesktopCore {
     }
 
     fn recover_interrupted(&mut self) -> CoreResult<()> {
-        // A filesystem rename and a SQLite commit cannot be atomic together.
-        // Any interrupted operation is held for explicit repair, never guessed
-        // into success or silently overwritten on restart.
-        self.conn.execute(
-            "UPDATE transactions SET status='recovery_needed'
-             WHERE status IN ('executing','undoing')",
-            [],
-        )?;
+        // SQLite and NTFS cannot commit atomically. Reconcile each journaled
+        // operation conservatively: only restore a file when its counterpart
+        // is absent and its snapshot still matches. Never overwrite.
+        let interrupted = {
+            let mut statement = self.conn.prepare(
+                "SELECT id,plan_id,status,destination_folder,created_dir
+                 FROM transactions WHERE status IN ('executing','undoing')
+                 ORDER BY created_at",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (transaction_id, plan_id, old_status, folder, created_dir) in interrupted {
+            let items = self.load_transaction_items(&transaction_id)?;
+            let destination_dir = self.desktop.join(&folder);
+            let mut safe = self.check_destination_dir(&destination_dir).is_ok();
+            if safe {
+                for (ordinal, item) in items.iter().enumerate().rev() {
+                    if item.source.parent() != Some(self.desktop.as_path())
+                        || item.destination.parent() != Some(destination_dir.as_path())
+                    {
+                        safe = false;
+                        break;
+                    }
+                    if self.check_destination_dir(&destination_dir).is_err() {
+                        safe = false;
+                        break;
+                    }
+                    let source_exists = path_exists(&item.source);
+                    let destination_exists = path_exists(&item.destination);
+                    match (source_exists, destination_exists) {
+                        (Ok(true), Ok(false)) => {}
+                        (Ok(false), Ok(true))
+                            if check_regular_file(
+                                &item.destination,
+                                item.expected_size,
+                                item.expected_modified_ns,
+                            )
+                            .is_ok() =>
+                        {
+                            if move_noreplace(&item.destination, &item.source).is_err() {
+                                safe = false;
+                                break;
+                            }
+                            let _ = self.conn.execute(
+                                "UPDATE transaction_items SET state='rolled_back'
+                                 WHERE transaction_id=?1 AND ordinal=?2",
+                                params![transaction_id, ordinal as i64],
+                            );
+                        }
+                        _ => {
+                            safe = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if safe {
+                let status = if old_status == "undoing" {
+                    "undone"
+                } else {
+                    "failed"
+                };
+                self.set_transaction_status(&transaction_id, status)?;
+                if old_status == "executing" {
+                    self.conn.execute(
+                        "UPDATE action_plans SET status='failed' WHERE id=?1",
+                        [&plan_id],
+                    )?;
+                }
+                if created_dir {
+                    let _ = fs::remove_dir(&destination_dir);
+                }
+            } else {
+                self.set_transaction_status(&transaction_id, "recovery_needed")?;
+            }
+        }
         Ok(())
     }
 }
@@ -889,5 +972,75 @@ mod tests {
             assert!(validate_folder(value).is_err(), "{value}");
         }
         assert!(validate_folder("Documents").is_ok());
+    }
+
+    #[test]
+    fn interrupted_execution_rolls_back_on_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let desktop = temp.path().join("Desktop");
+        fs::create_dir(&desktop).unwrap();
+        fs::write(desktop.join("alpha.txt"), b"alpha").unwrap();
+        let db = temp.path().join("index.sqlite");
+        let mut core = DesktopCore::open(&desktop, &db).unwrap();
+        core.scan_desktop().unwrap();
+        let id = core.list_files().unwrap()[0].id;
+        let plan = core.create_move_plan(vec![id], "Sorted".into()).unwrap();
+        let item = core.load_plan_items(&plan.id).unwrap().remove(0);
+        let transaction_id = Uuid::new_v4().to_string();
+        core.conn.execute(
+            "INSERT INTO transactions(id,plan_id,created_at,status,destination_folder,created_dir)
+             VALUES(?1,?2,?3,'executing','Sorted',1)",
+            params![transaction_id, plan.id, Utc::now().to_rfc3339()],
+        ).unwrap();
+        core.conn
+            .execute(
+                "INSERT INTO transaction_items
+             (transaction_id,ordinal,source,destination,expected_size,expected_modified_ns,state)
+             VALUES(?1,0,?2,?3,?4,?5,'pending')",
+                params![
+                    transaction_id,
+                    item.source.to_string_lossy(),
+                    item.destination.to_string_lossy(),
+                    item.expected_size,
+                    item.expected_modified_ns
+                ],
+            )
+            .unwrap();
+        fs::create_dir(desktop.join("Sorted")).unwrap();
+        move_noreplace(&item.source, &item.destination).unwrap();
+        drop(core);
+        let recovered = DesktopCore::open(&desktop, &db).unwrap();
+        assert!(desktop.join("alpha.txt").exists());
+        assert!(!desktop.join("Sorted").exists());
+        assert_eq!(recovered.list_history().unwrap()[0].status, "failed");
+    }
+
+    #[test]
+    fn interrupted_undo_finishes_on_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let desktop = temp.path().join("Desktop");
+        fs::create_dir(&desktop).unwrap();
+        fs::write(desktop.join("alpha.txt"), b"alpha").unwrap();
+        let db = temp.path().join("index.sqlite");
+        let mut core = DesktopCore::open(&desktop, &db).unwrap();
+        core.scan_desktop().unwrap();
+        let id = core.list_files().unwrap()[0].id;
+        let plan = core.create_move_plan(vec![id], "Sorted".into()).unwrap();
+        let transaction = core.execute_plan(&plan.id).unwrap();
+        core.conn
+            .execute(
+                "UPDATE transactions SET status='undoing' WHERE id=?1",
+                [&transaction.id],
+            )
+            .unwrap();
+        move_noreplace(
+            &desktop.join("Sorted/alpha.txt"),
+            &desktop.join("alpha.txt"),
+        )
+        .unwrap();
+        drop(core);
+        let recovered = DesktopCore::open(&desktop, &db).unwrap();
+        assert!(desktop.join("alpha.txt").exists());
+        assert_eq!(recovered.list_history().unwrap()[0].status, "undone");
     }
 }

@@ -100,6 +100,26 @@ export interface ProviderInput {
   clearApiKey: boolean;
 }
 
+export interface AiFile {
+  name: string;
+  extension: string;
+}
+export interface AiRequestPreview {
+  id: string;
+  providerId: string;
+  providerName: string;
+  model: string;
+  baseUrl: string;
+  files: AiFile[];
+  instruction: string;
+}
+export interface AiPlanResult {
+  plan: ActionPlan;
+  preview: PlanPreview;
+  destination: string;
+  reason: string;
+}
+
 export const desktopCore = {
   scanDesktop: () => invoke<ScanSummary>("scan_desktop"),
   listFiles: () => invoke<FileEntry[]>("list_files"),
@@ -122,4 +142,8 @@ export const desktopCore = {
   saveProvider: (input: ProviderInput) =>
     invoke<ProviderConfig>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
+  previewAiRequest: (fileIds: number[], providerId: string, instruction: string) =>
+    invoke<AiRequestPreview>("preview_ai_request", { fileIds, providerId, instruction }),
+  generateAiPlan: (requestId: string) =>
+    invoke<AiPlanResult>("generate_ai_plan", { requestId }),
 };

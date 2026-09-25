@@ -150,6 +150,17 @@ input[type="checkbox"] { accent-color: #176de6; width: 15px; height: 15px; }
 .inline-error { color: #a94340; background: #fff0ee; }
 .inline-notice { color: #247b53; background: #eaf8f0; }
 .subtle { color: #98a8b7; font-weight: 400; }
+.ai-form { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 12px; align-items: end; }
+.ai-form label { display: flex; flex-direction: column; gap: 6px; color: #4d5f73; font-size: 11px; font-weight: 700; }
+.ai-form select, .ai-form textarea { border: 1px solid #d6e0ea; border-radius: 7px; background: #fff; padding: 9px 10px; width: 100%; outline: none; font: inherit; color: #253449; }
+.ai-form .ai-instruction { grid-column: 1 / -1; }
+.ai-form textarea { resize: vertical; min-height: 65px; font-size: 12px; }
+.ai-form > button:last-child { grid-column: 1 / -1; justify-self: start; }
+.ai-request-preview { margin-top: 16px; padding: 15px; border: 1px solid #d6e7f7; border-radius: 10px; background: #f6fbff; }
+.ai-request-preview p { margin: 8px 0; color: #60758a; font-size: 11px; }
+.ai-request-preview ul { max-height: 150px; overflow: auto; padding: 8px 8px 8px 26px; margin: 10px 0; border: 1px solid #e2edf6; border-radius: 7px; background: #fff; font-size: 11px; }
+.ai-request-preview li { padding: 3px; }
+.ai-request-preview li span { color: #93a4b4; }
 
 @media (max-width: 950px) {
   .workspace-grid { grid-template-columns: 1fr; }

@@ -39,7 +39,10 @@ requires explicit local-use selection.
 The index does not inspect file contents. Before a user-triggered AI request,
 the UI shows the request summary. It sends selected names/extensions and the
 user instruction only; no absolute paths or unselected files. Model responses
-are untrusted and cannot contain executable filesystem commands.
+are untrusted and cannot contain executable filesystem commands. Provider
+requests have a 35-second timeout, no HTTP redirects, and a 128 KiB response
+limit. A model response must parse as the expected JSON shape and its folder
+name passes the same Core policy before a plan is created.
 
 ## Tauri capability
 

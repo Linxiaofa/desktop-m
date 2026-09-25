@@ -16,5 +16,7 @@ validator and policy engine, be previewed to the user, and be executed as a
 journaled transaction with Undo.
 
 Keep provider secrets in Windows Credential Manager. Do not place keys in
-plans, SQLite, logs, or model prompts. A model request may use only the files
-the user selected and approved for that request.
+plans, SQLite, logs, or model prompts. Before a model request, show the
+selected names/extensions and instruction that will be sent. Do not send
+absolute paths, file content, or unselected file data. Treat the model's
+folder suggestion as untrusted; Core constructs and validates the ActionPlan.

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   desktopCore,
   type ActionPlan,
+  type AiPlanResult,
   type FileEntry,
   type HistoryEntry,
   type PlanPreview,
@@ -11,6 +12,7 @@ import {
 } from "./api";
 import RulesPanel from "./RulesPanel";
 import ProviderPanel from "./ProviderPanel";
+import AiPanel from "./AiPanel";
 
 type BusyAction = "scan" | "refresh" | "preview" | "suggest" | "execute" | `undo:${string}` | null;
 type Notice = { kind: "success" | "info"; message: string } | null;
@@ -91,6 +93,7 @@ function App() {
   }, [files, search]);
 
   const selectableFiles = visibleFiles.filter((file) => file.kind === "file");
+  const aiSelectedIds = [...selectedIds].sort((a, b) => a - b);
   const allVisibleSelected =
     selectableFiles.length > 0 && selectableFiles.every((file) => selectedIds.has(file.id));
   const isBusy = busy !== null;
@@ -249,6 +252,19 @@ function App() {
     } finally {
       setBusy(null);
     }
+  }
+
+  function handleAiPlanReady(result: AiPlanResult): void {
+    setDestination(result.destination);
+    setPlan(result.plan);
+    setPreview(result.preview);
+    setRuleSuggestions([]);
+    setError(null);
+    setNotice({
+      kind: "info",
+      message: "AI 建议已转为 Desktop Core ActionPlan。请检查上方预览，再决定是否执行。",
+    });
+    document.getElementById("plan-heading")?.scrollIntoView({ behavior: "smooth" });
   }
 
   async function handleExecute(): Promise<void> {
@@ -533,6 +549,7 @@ function App() {
         </section>
         <RulesPanel onChanged={() => setRuleSuggestions([])} />
         <ProviderPanel />
+        <AiPanel selectedIds={aiSelectedIds} onPlanReady={handleAiPlanReady} />
       </main>
       <footer className="app-footer">ActionPlan → Validator → Policy Engine → Transaction Executor → File System</footer>
     </div>
